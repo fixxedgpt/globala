@@ -12,7 +12,10 @@ if not LocalPlayer then
 	return
 end
 
-local Mouse = LocalPlayer:GetMouse()
+local Mouse
+pcall(function()
+	Mouse = LocalPlayer:GetMouse()
+end)
 
 local Environment = _G
 pcall(function()
@@ -21,6 +24,23 @@ pcall(function()
 		Environment = CurrentEnvironment
 	end
 end)
+
+local LoadStatus = {
+	Stage = "bootstrap",
+	Error = nil,
+}
+Environment.__GlobalAnarchyLoadStatus = LoadStatus
+pcall(function()
+	getgenv().__GlobalAnarchyLoadStatus = LoadStatus
+end)
+pcall(function()
+	_G.__GlobalAnarchyLoadStatus = LoadStatus
+end)
+
+local function SetLoadStatus(Stage, ErrorMessage)
+	LoadStatus.Stage = Stage
+	LoadStatus.Error = ErrorMessage and tostring(ErrorMessage) or nil
+end
 
 local ExistingRuntime = Environment.__MatchaAimRuntime
 if type(ExistingRuntime) == "table" and type(ExistingRuntime.Unload) == "function" then
@@ -229,6 +249,22 @@ local function Clamp(Value, Minimum, Maximum)
 		return Maximum
 	end
 	return Value
+end
+
+local function GetMousePosition()
+	if not Mouse then
+		pcall(function()
+			Mouse = LocalPlayer:GetMouse()
+		end)
+	end
+
+	local X = 0
+	local Y = 0
+	pcall(function()
+		X = Mouse and Mouse.X or 0
+		Y = Mouse and Mouse.Y or 0
+	end)
+	return Vector2.new(X, Y)
 end
 
 local CachedPingSeconds = 0
@@ -761,7 +797,7 @@ local function FindBasePartByName(Character, BaseParts, Name)
 end
 
 local function ResolveTargetPart(Character, Head, RootPart, UpperTorso, BaseParts, MousePosition)
-	MousePosition = MousePosition or Vector2.new(Mouse.X, Mouse.Y)
+	MousePosition = MousePosition or GetMousePosition()
 	local ClosestPart
 	local ClosestDistanceSquared = math.huge
 	local SeenParts = {}
@@ -903,7 +939,7 @@ local function FindClosestTarget(Selection, MousePosition)
 	end
 	local FovRadius = (Selection and Selection.FovRadius) or Flags.FovRadius
 	local MaxDistance = (Selection and Selection.MaxDistance) or Flags.MaxAcquireDistance
-	MousePosition = MousePosition or Vector2.new(Mouse.X, Mouse.Y)
+	MousePosition = MousePosition or GetMousePosition()
 	local LocalRoot = GetLocalRoot()
 	local LocalPosition = GetPartPosition(LocalRoot)
 	local FovRadiusSquared = FovRadius * FovRadius
@@ -1096,22 +1132,44 @@ local function AddUiStatusEntrySupport(Source)
 end
 
 local function LoadUiLibrary()
+	SetLoadStatus("loading UI")
 	local Success, Result = pcall(function()
-		local Source = game:HttpGet("https://raw.githubusercontent.com/neaxusxgod-png/INS-ui/main/uilib.min.lua")
+		local UiUrl = "https://raw.githubusercontent.com/neaxusxgod-png/INS-ui/main/uilib.min.lua"
+		local Source
+		pcall(function()
+			Source = game:HttpGet(UiUrl)
+		end)
+		if type(Source) ~= "string" or #Source == 0 then
+			local RequestFunction = request or http_request
+			pcall(function()
+				RequestFunction = RequestFunction or (syn and syn.request)
+			end)
+			if type(RequestFunction) == "function" then
+				local Response = RequestFunction({
+					Url = UiUrl,
+					Method = "GET",
+				})
+				Source = type(Response) == "table" and (Response.Body or Response.body) or Response
+			end
+		end
 		assert(type(Source) == "string" and #Source > 0, "empty UI library response")
 
 		Source, UiStatusEntriesSupported = AddUiStatusEntrySupport(Source)
-		local Chunk = loadstring(Source)
-		assert(type(Chunk) == "function", "UI library compilation failed")
+		local Compiler = loadstring or load
+		assert(type(Compiler) == "function", "loadstring/load is unavailable")
+		local Chunk, CompileError = Compiler(Source)
+		assert(type(Chunk) == "function", "UI library compilation failed: " .. tostring(CompileError))
 
 		local LoadedLibrary = Chunk()
 		return LoadedLibrary or INSui
 	end)
 
 	if Success and Result then
+		SetLoadStatus("UI loaded")
 		return Result
 	end
 
+	SetLoadStatus("UI failed", Result)
 	warn("Failed to load the UI library: " .. tostring(Result))
 	return nil
 end
@@ -1124,6 +1182,7 @@ if not Lib then
 end
 
 local WindowSuccess, WindowResult = pcall(function()
+	SetLoadStatus("creating window")
 	return Lib:CreateWindow({
 		title = "virtuosity",
 		subtitle = "Global Anarchy",
@@ -1143,12 +1202,14 @@ local WindowSuccess, WindowResult = pcall(function()
 end)
 
 if not WindowSuccess or not WindowResult then
+	SetLoadStatus("window failed", WindowResult)
 	warn("Failed to create the UI window: " .. tostring(WindowResult))
 	Runtime.Unload()
 	return
 end
 
 Win = WindowResult
+SetLoadStatus("building controls")
 pcall(function()
 	Win:SetTitle("virtuosity")
 end)
@@ -2391,17 +2452,22 @@ TrackConnection(RunService.RenderStepped:Connect(function(DeltaTime)
 	end
 end))
 
-local FovCircleOutline = TrackDrawing(Drawing.new("Circle"))
-FovCircleOutline.Thickness = 3
-FovCircleOutline.NumSides = 64
-FovCircleOutline.Color = Color3.fromRGB(0, 0, 0)
-FovCircleOutline.Visible = false
+local FovCircleOutline = CreateDrawingObject("Circle")
+if FovCircleOutline then
+	SetDrawingProperty(FovCircleOutline, "Thickness", 3)
+	SetDrawingProperty(FovCircleOutline, "NumSides", 64)
+	SetDrawingProperty(FovCircleOutline, "Color", Color3.fromRGB(0, 0, 0))
+	SetDrawingProperty(FovCircleOutline, "Visible", false)
+end
 
-local FovCircle = TrackDrawing(Drawing.new("Circle"))
-FovCircle.Thickness = 1
-FovCircle.NumSides = 64
-FovCircle.Visible = false
-FovCircle.ZIndex = 5
+local FovCircle = CreateDrawingObject("Circle")
+if FovCircle then
+	SetDrawingProperty(FovCircle, "Thickness", 1)
+	SetDrawingProperty(FovCircle, "NumSides", 64)
+	SetDrawingProperty(FovCircle, "Visible", false)
+	SetDrawingProperty(FovCircle, "ZIndex", 5)
+end
+local CanDrawFov = FovCircleOutline ~= nil and FovCircle ~= nil
 
 local SilentStatusUpdatedAt = -math.huge
 local FovWasVisible = false
@@ -2414,8 +2480,8 @@ TrackConnection(RunService.RenderStepped:Connect(function()
 		return
 	end
 
-	local ShowAimFov = Flags.DrawFov
-	local ShowSilentFov = Flags.DrawFov and Flags.SilentAim and Flags.SilentFovCheck
+	local ShowAimFov = CanDrawFov and Flags.DrawFov
+	local ShowSilentFov = CanDrawFov and Flags.DrawFov and Flags.SilentAim and Flags.SilentFovCheck
 	local ShowFov = ShowAimFov or ShowSilentFov
 	local DisplayFovRadius = 0
 	if ShowAimFov then
@@ -2427,7 +2493,7 @@ TrackConnection(RunService.RenderStepped:Connect(function()
 
 	local MousePosition
 	if ShowFov then
-		MousePosition = Vector2.new(Mouse.X, Mouse.Y)
+		MousePosition = GetMousePosition()
 		FovCircleOutline.Position = MousePosition
 		FovCircle.Position = MousePosition
 
@@ -2447,7 +2513,7 @@ TrackConnection(RunService.RenderStepped:Connect(function()
 		end
 	end
 
-	if FovWasVisible ~= ShowFov then
+	if CanDrawFov and FovWasVisible ~= ShowFov then
 		FovCircleOutline.Visible = ShowFov
 		FovCircle.Visible = ShowFov
 		FovWasVisible = ShowFov
@@ -2481,7 +2547,7 @@ TrackConnection(RunService.Heartbeat:Connect(function(DeltaTime)
 		return
 	end
 
-	local MousePosition = Vector2.new(Mouse.X, Mouse.Y)
+	local MousePosition = GetMousePosition()
 	local Target
 	local HasStickyLock = Flags.StickyAim and (LockedPlayer ~= nil or Flags.LockedPlayerName ~= nil)
 	if HasStickyLock then
@@ -2550,3 +2616,4 @@ Environment.UnloadDesertStormAim = Runtime.Unload
 Environment.UnloadGlobalAnarchyAim = Runtime.Unload
 Environment.__MatchaAimRuntime = Runtime
 InitializationComplete = true
+SetLoadStatus("ready")
