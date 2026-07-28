@@ -99,7 +99,9 @@ local SilentAimStatus = {
 	Text = "inactive",
 }
 
-local Runtime = {}
+local Runtime = {
+	AimStatus = "ready",
+}
 
 local function TrackConnection(Connection)
 	Connections[#Connections + 1] = Connection
@@ -230,21 +232,50 @@ local function GetPlayerCharacter(Player)
 		Character = Player.Character
 	end)
 	if Character then
+		Runtime.PlayerModels = Runtime.PlayerModels or {}
+		Runtime.PlayerModels[Player] = Character
 		return Character
 	end
 
-	local PlayerName = Player.Name
+	Runtime.PlayerModels = Runtime.PlayerModels or {}
+	local CachedCharacter = Runtime.PlayerModels[Player]
+	if CachedCharacter then
+		local IsUsable = true
+		pcall(function()
+			IsUsable = CachedCharacter.Parent ~= nil
+		end)
+		if IsUsable then
+			return CachedCharacter
+		end
+		Runtime.PlayerModels[Player] = nil
+	end
+
+	local PlayerName
+	local UserId
+	pcall(function()
+		PlayerName = Player.Name
+		UserId = Player.UserId
+	end)
+	if not PlayerName then
+		return nil
+	end
+
 	Character = SafeFindFirstChild(Workspace, PlayerName)
 	if Character then
+		Runtime.PlayerModels[Player] = Character
 		return Character
 	end
 
-	local UserId = tostring(Player.UserId)
+	UserId = UserId and tostring(UserId) or nil
 	for _, ContainerName in { "Characters", "PlayerCharacters", "PlayerModels", "Actors", "Entities", "Alive" } do
 		local Container = SafeFindFirstChild(Workspace, ContainerName)
 		if Container then
-			Character = SafeFindFirstChild(Container, PlayerName) or SafeFindFirstChild(Container, UserId)
+			Character = SafeFindFirstChild(Container, PlayerName)
+			if not Character and UserId then
+				Character = SafeFindFirstChild(Container, UserId)
+			end
 			if Character then
+				Runtime.PlayerModels[Player] = Character
 				return Character
 			end
 			local Children
@@ -255,53 +286,260 @@ local function GetPlayerCharacter(Player)
 				local OwnerName
 				local OwnerId
 				pcall(function()
-					OwnerName = Model:GetAttribute("PlayerName") or Model:GetAttribute("OwnerName")
-					OwnerId = Model:GetAttribute("UserId") or Model:GetAttribute("OwnerUserId")
+					OwnerName = Model:GetAttribute("PlayerName")
+						or Model:GetAttribute("OwnerName")
+						or Model:GetAttribute("Username")
+					OwnerId = Model:GetAttribute("UserId")
+						or Model:GetAttribute("PlayerUserId")
+						or Model:GetAttribute("OwnerUserId")
 				end)
-				if OwnerName == PlayerName or tostring(OwnerId) == UserId then
+				if OwnerName == PlayerName or (UserId and tostring(OwnerId) == UserId) then
+					Runtime.PlayerModels[Player] = Model
 					return Model
 				end
 			end
 		end
 	end
-	return nil
+
+	local Now = tick()
+	if Now - (Runtime.ModelScanAt or -math.huge) < 0.75 then
+		return Runtime.PlayerModels[Player]
+	end
+	Runtime.ModelScanAt = Now
+
+	local PlayerList
+	pcall(function()
+		PlayerList = Players:GetPlayers()
+	end)
+	PlayerList = PlayerList or {}
+	local ClaimedModels = {}
+	for _, KnownPlayer in PlayerList do
+		local KnownCharacter
+		pcall(function()
+			KnownCharacter = KnownPlayer.Character
+		end)
+		if KnownCharacter then
+			Runtime.PlayerModels[KnownPlayer] = KnownCharacter
+			ClaimedModels[KnownCharacter] = true
+		end
+	end
+
+	local Candidates = {}
+	local CandidateSet = {}
+	local Descendants
+	pcall(function()
+		Descendants = Workspace:GetDescendants()
+	end)
+	for _, Instance in Descendants or {} do
+		local ClassName
+		local InstanceName
+		pcall(function()
+			ClassName = Instance.ClassName
+			InstanceName = Instance.Name
+		end)
+
+		local IsControllerManager = ClassName == "ControllerManager"
+		if not IsControllerManager then
+			pcall(function()
+				IsControllerManager = Instance:IsA("ControllerManager")
+			end)
+		end
+
+		local Candidate
+		if IsControllerManager then
+			pcall(function()
+				Candidate = Instance.Parent
+			end)
+		elseif InstanceName then
+			local LowerName = string.lower(InstanceName)
+			if LowerName == "characterblock" or LowerName == "characterroot" then
+				pcall(function()
+					Candidate = Instance.Parent
+				end)
+			end
+		end
+
+		if Candidate then
+			local IsModel = false
+			pcall(function()
+				IsModel = Candidate:IsA("Model")
+			end)
+			if not IsModel then
+				local Parent
+				pcall(function()
+					Parent = Candidate.Parent
+				end)
+				Candidate = Parent or Candidate
+			end
+			if not CandidateSet[Candidate] then
+				CandidateSet[Candidate] = true
+				Candidates[#Candidates + 1] = Candidate
+			end
+		end
+	end
+
+	Runtime.ControllerRigCount = #Candidates
+	local CameraSubject
+	pcall(function()
+		CameraSubject = Workspace.CurrentCamera and Workspace.CurrentCamera.CameraSubject
+	end)
+	if CameraSubject then
+		for _, Candidate in Candidates do
+			local IsLocalCharacter = CameraSubject == Candidate
+			if not IsLocalCharacter then
+				pcall(function()
+					IsLocalCharacter = CameraSubject:IsDescendantOf(Candidate)
+				end)
+			end
+			if IsLocalCharacter then
+				Runtime.PlayerModels[LocalPlayer] = Candidate
+				ClaimedModels[Candidate] = true
+				break
+			end
+		end
+	end
+
+	for _, Candidate in Candidates do
+		local Owner
+		pcall(function()
+			Owner = Players:GetPlayerFromCharacter(Candidate)
+		end)
+		if Owner then
+			Runtime.PlayerModels[Owner] = Candidate
+			ClaimedModels[Candidate] = true
+		end
+	end
+
+	for _, Candidate in Candidates do
+		if ClaimedModels[Candidate] then
+			continue
+		end
+
+		local CandidateName = ""
+		local OwnerName
+		local OwnerId
+		pcall(function()
+			CandidateName = string.lower(Candidate.Name)
+			OwnerName = Candidate:GetAttribute("PlayerName")
+				or Candidate:GetAttribute("OwnerName")
+				or Candidate:GetAttribute("Username")
+			OwnerId = Candidate:GetAttribute("UserId")
+				or Candidate:GetAttribute("PlayerUserId")
+				or Candidate:GetAttribute("OwnerUserId")
+		end)
+
+		for _, CandidatePlayer in PlayerList do
+			if Runtime.PlayerModels[CandidatePlayer] then
+				continue
+			end
+			local CandidatePlayerName
+			local CandidateUserId
+			pcall(function()
+				CandidatePlayerName = CandidatePlayer.Name
+				CandidateUserId = CandidatePlayer.UserId
+			end)
+			if
+				CandidatePlayerName
+				and (
+					OwnerName == CandidatePlayerName
+					or string.find(CandidateName, string.lower(CandidatePlayerName), 1, true)
+					or (CandidateUserId and tostring(OwnerId) == tostring(CandidateUserId))
+					or (CandidateUserId and string.find(CandidateName, tostring(CandidateUserId), 1, true))
+				)
+			then
+				Runtime.PlayerModels[CandidatePlayer] = Candidate
+				ClaimedModels[Candidate] = true
+				break
+			end
+		end
+	end
+
+	local CandidateIndex = 1
+	for _, CandidatePlayer in PlayerList do
+		if Runtime.PlayerModels[CandidatePlayer] then
+			continue
+		end
+		while Candidates[CandidateIndex] and ClaimedModels[Candidates[CandidateIndex]] do
+			CandidateIndex = CandidateIndex + 1
+		end
+		if Candidates[CandidateIndex] then
+			Runtime.PlayerModels[CandidatePlayer] = Candidates[CandidateIndex]
+			ClaimedModels[Candidates[CandidateIndex]] = true
+			CandidateIndex = CandidateIndex + 1
+		end
+	end
+
+	return Runtime.PlayerModels[Player]
 end
 
 local function ResolveEspCharacter(Character)
+	if not Character then
+		return nil, nil, nil, nil
+	end
+
 	local Humanoid = SafeFindFirstChild(Character, "Humanoid")
 	local Head = SafeFindFirstChild(Character, "Head")
 	local UpperTorso = SafeFindFirstChild(Character, "UpperTorso") or SafeFindFirstChild(Character, "Torso")
 	local RootPart = SafeFindFirstChild(Character, "HumanoidRootPart")
 		or SafeFindFirstChild(Character, "RootPart")
-		or UpperTorso
+		or SafeFindFirstChild(Character, "CharacterBlock")
+	local ControllerManager
 	local FirstPart
 	local HighestPart = Head
 	local HighestY = -math.huge
-
-	if Head and RootPart then
-		return Humanoid, Head, RootPart, UpperTorso or RootPart
-	end
 
 	local Descendants
 	pcall(function()
 		Descendants = Character:GetDescendants()
 	end)
 	for _, Descendant in Descendants or {} do
+		local ClassName
+		pcall(function()
+			ClassName = Descendant.ClassName
+		end)
+
+		if not ControllerManager and ClassName == "ControllerManager" then
+			ControllerManager = Descendant
+		end
+
 		local IsBasePart = false
 		pcall(function()
 			IsBasePart = Descendant:IsA("BasePart")
 		end)
+		if
+			not IsBasePart
+			and (
+				ClassName == "Part"
+				or ClassName == "MeshPart"
+				or ClassName == "UnionOperation"
+				or ClassName == "TrussPart"
+				or ClassName == "Seat"
+				or ClassName == "VehicleSeat"
+			)
+		then
+			IsBasePart = true
+		end
 		if IsBasePart then
 			FirstPart = FirstPart or Descendant
 			local Name = string.lower(Descendant.Name)
 			if not Head and (Name == "head" or Name == "headhitbox" or Name == "skull") then
 				Head = Descendant
 			elseif not RootPart
-				and (Name == "root" or Name == "characterroot" or Name == "characterblock" or Name == "collision")
+				and (
+					Name == "root"
+					or Name == "rootpart"
+					or Name == "characterroot"
+					or Name == "characterblock"
+					or Name == "collision"
+					or Name == "collider"
+				)
 			then
 				RootPart = Descendant
 			end
-			if not UpperTorso and (Name == "uppertorso" or Name == "torso" or Name == "body") then
+			if
+				not UpperTorso
+				and (Name == "uppertorso" or Name == "torso" or Name == "body" or Name == "chest")
+			then
 				UpperTorso = Descendant
 			end
 			local Position = GetPartPosition(Descendant)
@@ -316,6 +554,20 @@ local function ResolveEspCharacter(Character)
 				end
 			end)
 		end
+	end
+
+	if not ControllerManager then
+		pcall(function()
+			ControllerManager = Character:FindFirstChildWhichIsA("ControllerManager")
+		end)
+	end
+	if ControllerManager then
+		local ControllerRoot
+		pcall(function()
+			ControllerRoot = ControllerManager.RootPart
+		end)
+		RootPart = ControllerRoot or RootPart
+		Runtime.ControllerResolverSeen = true
 	end
 
 	if not RootPart then
@@ -453,6 +705,13 @@ local function BuildTarget(Player, MousePosition)
 		return nil
 	end
 
+	local AimOffsetY = 0
+	if TargetPart == RootPart and Head == RootPart then
+		pcall(function()
+			AimOffsetY = math.max(RootPart.Size.Y * 0.38, 2.25)
+		end)
+	end
+
 	return {
 		Player = Player,
 		Character = Character,
@@ -461,6 +720,7 @@ local function BuildTarget(Player, MousePosition)
 		RootPart = RootPart,
 		UpperTorso = UpperTorso,
 		TargetPart = TargetPart,
+		AimOffsetY = AimOffsetY,
 	}
 end
 
@@ -555,6 +815,9 @@ local function PredictTargetPosition(Target, Origin)
 	local Position = GetPartPosition(TargetPart)
 	if not Position then
 		return nil
+	end
+	if Target.AimOffsetY and Target.AimOffsetY > 0 then
+		Position = Position + Vector3.new(0, Target.AimOffsetY, 0)
 	end
 	if not Flags.AutoPrediction or not Origin then
 		return Position
@@ -776,6 +1039,9 @@ local PredictionSection = AimTab:Section("prediction", "Right")
 local SilentSection = AimTab:Section("silent aim", "Right")
 
 AimbotSection:Label("profile: Global Anarchy | 132640332499066")
+AimbotSection:Label(function()
+	return "resolver: " .. Runtime.AimStatus
+end)
 
 local AimbotToggle = AimbotSection:Toggle("enabled", false, function(Value)
 	Flags.Aimbot = Value
@@ -1549,6 +1815,13 @@ local function GetEspBox(Target)
 	if not HeadPosition or not RootPosition then
 		return nil
 	end
+	if Target.Head == Target.RootPart or math.abs(HeadPosition.Y - RootPosition.Y) < 0.15 then
+		local HeightOffset = 2.75
+		pcall(function()
+			HeightOffset = math.max(Target.RootPart.Size.Y * 0.5, HeightOffset)
+		end)
+		HeadPosition = RootPosition + Vector3.new(0, HeightOffset, 0)
+	end
 
 	local HeadScreen, HeadVisible = ProjectToScreen(HeadPosition)
 	local RootScreen, RootVisible = ProjectToScreen(RootPosition)
@@ -1800,6 +2073,11 @@ local function UpdateEspFrame()
 			.. " drawn | "
 			.. tostring(PlayerCount)
 			.. " players"
+		if Runtime.ControllerResolverSeen then
+			EspStatus.Text = EspStatus.Text .. " | controller"
+		elseif Runtime.ControllerRigCount then
+			EspStatus.Text = EspStatus.Text .. " | " .. tostring(Runtime.ControllerRigCount) .. " rigs"
+		end
 		if next(EspSkippedProperties) then
 			EspStatus.Text = EspStatus.Text .. " | compat"
 		end
@@ -1893,11 +2171,13 @@ TrackConnection(RunService.Heartbeat:Connect(function(DeltaTime)
 		if LockedPlayer or Flags.LockedPlayerName or SmoothedAimPosition then
 			ClearLock()
 		end
+		Runtime.AimStatus = "hold MouseButton2"
 		return
 	end
 
 	local Camera = Workspace.CurrentCamera
 	if not Camera then
+		Runtime.AimStatus = "waiting for camera"
 		return
 	end
 
@@ -1909,6 +2189,7 @@ TrackConnection(RunService.Heartbeat:Connect(function(DeltaTime)
 		Target = GetLockedTarget(MousePosition)
 		if not Target then
 			ClearLock()
+			Runtime.AimStatus = "lost target"
 			return
 		end
 	else
@@ -1921,6 +2202,10 @@ TrackConnection(RunService.Heartbeat:Connect(function(DeltaTime)
 
 	if not Target then
 		ClearAimSmoothing()
+		Runtime.AimStatus = "no target"
+		if Runtime.ControllerRigCount then
+			Runtime.AimStatus = Runtime.AimStatus .. " | " .. tostring(Runtime.ControllerRigCount) .. " rigs"
+		end
 		return
 	end
 
@@ -1928,10 +2213,15 @@ TrackConnection(RunService.Heartbeat:Connect(function(DeltaTime)
 	local AimPosition = PredictTargetPosition(Target, CameraPosition)
 	if not AimPosition then
 		ClearAimSmoothing()
+		Runtime.AimStatus = "target has no position"
 		return
 	end
 
 	local TargetName = Target.Player.Name
+	Runtime.AimStatus = "tracking " .. TargetName
+	if Runtime.ControllerResolverSeen then
+		Runtime.AimStatus = Runtime.AimStatus .. " | controller"
+	end
 	local Smoothness = math.clamp(Flags.AimSmoothness or 0, 0, 100)
 	local LookPosition = AimPosition
 	if Smoothness > 0 then
@@ -1960,6 +2250,7 @@ TrackConnection(RunService.Heartbeat:Connect(function(DeltaTime)
 	end)
 	if not AimSuccess then
 		ClearAimSmoothing()
+		Runtime.AimStatus = "camera update failed"
 	end
 end))
 
