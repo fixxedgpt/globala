@@ -356,7 +356,6 @@ Runtime.ProcessModelScan = function()
 	Runtime.ModelScanIndex = Index
 
 	if Index <= #Queue and tick() - Runtime.ModelScanStartedAt < 6 then
-		task.delay(0.01, Runtime.ProcessModelScan)
 		return
 	end
 
@@ -408,7 +407,6 @@ Runtime.RequestModelScan = function()
 	Runtime.ModelScanStartedAt = tick()
 	Runtime.ModelScanActive = true
 	Runtime.AimStatus = "scanning models..."
-	task.delay(0, Runtime.ProcessModelScan)
 end
 
 local function GetPlayerCharacter(Player)
@@ -2141,6 +2139,15 @@ end
 TrackConnection(RunService.RenderStepped:Connect(function()
 	if not Flags.Running then
 		return
+	end
+
+	if Runtime.ModelScanActive then
+		local ScanSuccess, ScanError = pcall(Runtime.ProcessModelScan)
+		if not ScanSuccess then
+			Runtime.ModelScanActive = false
+			Runtime.AimStatus = "model scan failed"
+			EspStatus.Text = "scan error: " .. string.sub(tostring(ScanError), 1, 28)
+		end
 	end
 
 	local Now = tick()
