@@ -407,6 +407,20 @@ Runtime.RequestModelScan = function()
 	Runtime.ModelScanStartedAt = tick()
 	Runtime.ModelScanActive = true
 	Runtime.AimStatus = "scanning models..."
+	task.spawn(function()
+		while Flags.Running and Runtime.ModelScanActive do
+			local ScanSuccess, ScanError = pcall(Runtime.ProcessModelScan)
+			if not ScanSuccess then
+				Runtime.ModelScanActive = false
+				Runtime.AimStatus = "model scan failed"
+				EspStatus.Text = "scan error: " .. string.sub(tostring(ScanError), 1, 28)
+				break
+			end
+			if Runtime.ModelScanActive then
+				task.wait(0.02)
+			end
+		end
+	end)
 end
 
 local function GetPlayerCharacter(Player)
