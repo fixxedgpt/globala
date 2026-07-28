@@ -2,14 +2,11 @@ local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 local Players = game:GetService("Players")
 local LocalPlayer = Players.LocalPlayer
-local IsGlobalAnarchy
 
 if not LocalPlayer then
 	warn("LocalPlayer is unavailable; aborting cleanly.")
 	return
 end
-
-local Cache
 
 local Environment = _G
 pcall(function()
@@ -94,8 +91,6 @@ local SilentAim
 local LockedPlayer
 local SmoothedAimPosition
 local SmoothedAimTargetName
-local CachedAimSmoothness
-local CachedAimResponseSpeed
 local EspStatus = {
 	Text = "off",
 	LastError = nil,
@@ -109,15 +104,6 @@ local Runtime = {}
 local function TrackConnection(Connection)
 	Connections[#Connections + 1] = Connection
 	return Connection
-end
-
-local function GetCachedPlayers()
-	local Now = tick()
-	if Now - Cache.PlayersUpdatedAt >= 0.5 then
-		Cache.Players = Players:GetPlayers()
-		Cache.PlayersUpdatedAt = Now
-	end
-	return Cache.Players
 end
 
 local function TrackDrawing(DrawingObject)
@@ -176,7 +162,6 @@ function Runtime.Unload()
 		Environment.__MatchaAimRuntime = nil
 		Environment.SilentAim = nil
 		Environment.UnloadDesertStormAim = nil
-		Environment.UnloadGlobalAnarchyAim = nil
 	end
 end
 
@@ -198,16 +183,6 @@ local function Clamp(Value, Minimum, Maximum)
 		return Maximum
 	end
 	return Value
-end
-
-local function GetMousePosition()
-	if not Cache.Mouse then
-		pcall(function()
-			Cache.Mouse = LocalPlayer:GetMouse()
-		end)
-	end
-	local CurrentMouse = Cache.Mouse
-	return Vector2.new(CurrentMouse and CurrentMouse.X or 0, CurrentMouse and CurrentMouse.Y or 0)
 end
 
 local CachedPingSeconds = 0
@@ -235,37 +210,11 @@ local function GetPingSeconds()
 	return CachedPingSeconds
 end
 
-local function IsTeammate(Player)
-	if not Flags.TeamCheck then
-		return false
-	end
-
-	local Success, Result = pcall(function()
-		return Player.Team ~= nil and Player.Team == LocalPlayer.Team
-	end)
-	return Success and Result
-end
-
 local function GetPartPosition(Part)
 	local Success, Position = pcall(function()
 		return Part and Part.Position
 	end)
-	if Success then
-		return Position
-	end
-	return nil
-end
-
-local function ProjectToScreen(Position)
-	if not Position then
-		return nil, false
-	end
-
-	local Success, ScreenPosition, OnScreen = pcall(WorldToScreen, Position)
-	if not Success then
-		return nil, false
-	end
-	return ScreenPosition, OnScreen
+	return Success and Position or nil
 end
 
 local function SafeFindFirstChild(Parent, Name)
@@ -284,63 +233,41 @@ local function GetPlayerCharacter(Player)
 		return Character
 	end
 
-	local Now = tick()
-	local Cached = Cache.Characters[Player]
-	if Cached and Now < Cached.ExpiresAt then
-		return Cached.Character or nil
+	local PlayerName = Player.Name
+	Character = SafeFindFirstChild(Workspace, PlayerName)
+	if Character then
+		return Character
 	end
 
-	local PlayerName = Player.Name
 	local UserId = tostring(Player.UserId)
-	Character = SafeFindFirstChild(Workspace, PlayerName)
-	if not Character and IsGlobalAnarchy then
-		for _, ContainerName in { "Characters", "PlayerCharacters", "PlayerModels", "Actors", "Entities", "Alive" } do
-			local Container = SafeFindFirstChild(Workspace, ContainerName)
-			if Container then
-				Character = SafeFindFirstChild(Container, PlayerName) or SafeFindFirstChild(Container, UserId)
-				if not Character then
-					local Children
-					pcall(function()
-						Children = Container:GetChildren()
-					end)
-					for _, Model in Children or {} do
-						local OwnerName
-						local OwnerId
-						pcall(function()
-							OwnerName = Model:GetAttribute("PlayerName") or Model:GetAttribute("OwnerName")
-							OwnerId = Model:GetAttribute("UserId") or Model:GetAttribute("OwnerUserId")
-						end)
-						if OwnerName == PlayerName or tostring(OwnerId) == UserId then
-							Character = Model
-							break
-						end
-					end
-				end
-				if Character then
-					break
+	for _, ContainerName in { "Characters", "PlayerCharacters", "PlayerModels", "Actors", "Entities", "Alive" } do
+		local Container = SafeFindFirstChild(Workspace, ContainerName)
+		if Container then
+			Character = SafeFindFirstChild(Container, PlayerName) or SafeFindFirstChild(Container, UserId)
+			if Character then
+				return Character
+			end
+			local Children
+			pcall(function()
+				Children = Container:GetChildren()
+			end)
+			for _, Model in Children or {} do
+				local OwnerName
+				local OwnerId
+				pcall(function()
+					OwnerName = Model:GetAttribute("PlayerName") or Model:GetAttribute("OwnerName")
+					OwnerId = Model:GetAttribute("UserId") or Model:GetAttribute("OwnerUserId")
+				end)
+				if OwnerName == PlayerName or tostring(OwnerId) == UserId then
+					return Model
 				end
 			end
 		end
 	end
-
-	Cache.Characters[Player] = {
-		Character = Character or false,
-		ExpiresAt = Now + 0.5,
-	}
-	return Character
+	return nil
 end
 
-local function ResolveCharacterModel(Character)
-	if not Character then
-		return nil
-	end
-
-	local Now = tick()
-	local Cached = Cache.Models[Character]
-	if Cached and Now < Cached.ExpiresAt then
-		return Cached.Humanoid, Cached.Head, Cached.RootPart, Cached.UpperTorso
-	end
-
+local function ResolveEspCharacter(Character)
 	local Humanoid = SafeFindFirstChild(Character, "Humanoid")
 	local Head = SafeFindFirstChild(Character, "Head")
 	local UpperTorso = SafeFindFirstChild(Character, "UpperTorso") or SafeFindFirstChild(Character, "Torso")
@@ -351,40 +278,43 @@ local function ResolveCharacterModel(Character)
 	local HighestPart = Head
 	local HighestY = -math.huge
 
-	if not Head or not RootPart or not Humanoid then
-		local Descendants
+	if Head and RootPart then
+		return Humanoid, Head, RootPart, UpperTorso or RootPart
+	end
+
+	local Descendants
+	pcall(function()
+		Descendants = Character:GetDescendants()
+	end)
+	for _, Descendant in Descendants or {} do
+		local IsBasePart = false
 		pcall(function()
-			Descendants = Character:GetDescendants()
+			IsBasePart = Descendant:IsA("BasePart")
 		end)
-		for _, Descendant in Descendants or {} do
-			local IsBasePart = false
-			pcall(function()
-				IsBasePart = Descendant:IsA("BasePart")
-			end)
-			if IsBasePart then
-				FirstPart = FirstPart or Descendant
-				local Name = string.lower(Descendant.Name)
-				if not Head and (Name == "head" or Name == "headhitbox" or Name == "skull") then
-					Head = Descendant
-				end
-				if not RootPart and (Name == "root" or Name == "characterroot" or Name == "characterblock" or Name == "collision") then
-					RootPart = Descendant
-				end
-				if not UpperTorso and (Name == "uppertorso" or Name == "torso" or Name == "body") then
-					UpperTorso = Descendant
-				end
-				local Position = GetPartPosition(Descendant)
-				if Position and Position.Y > HighestY then
-					HighestY = Position.Y
-					HighestPart = Descendant
-				end
-			elseif not Humanoid then
-				pcall(function()
-					if Descendant:IsA("Humanoid") then
-						Humanoid = Descendant
-					end
-				end)
+		if IsBasePart then
+			FirstPart = FirstPart or Descendant
+			local Name = string.lower(Descendant.Name)
+			if not Head and (Name == "head" or Name == "headhitbox" or Name == "skull") then
+				Head = Descendant
+			elseif not RootPart
+				and (Name == "root" or Name == "characterroot" or Name == "characterblock" or Name == "collision")
+			then
+				RootPart = Descendant
 			end
+			if not UpperTorso and (Name == "uppertorso" or Name == "torso" or Name == "body") then
+				UpperTorso = Descendant
+			end
+			local Position = GetPartPosition(Descendant)
+			if Position and Position.Y > HighestY then
+				HighestY = Position.Y
+				HighestPart = Descendant
+			end
+		elseif not Humanoid then
+			pcall(function()
+				if Descendant:IsA("Humanoid") then
+					Humanoid = Descendant
+				end
+			end)
 		end
 	end
 
@@ -395,29 +325,46 @@ local function ResolveCharacterModel(Character)
 	end
 	RootPart = RootPart or UpperTorso or FirstPart
 	Head = Head or HighestPart or RootPart
-	UpperTorso = UpperTorso or RootPart
-	Cached = {
-		Humanoid = Humanoid,
-		Head = Head,
-		RootPart = RootPart,
-		UpperTorso = UpperTorso,
-		ExpiresAt = Now + ((Head and RootPart) and 0.6 or 0.2),
-	}
-	Cache.Models[Character] = Cached
-	return Humanoid, Head, RootPart, UpperTorso
+	return Humanoid, Head, RootPart, UpperTorso or RootPart
 end
 
 local function GetLocalRoot()
 	local Character = GetPlayerCharacter(LocalPlayer)
-	local _, _, RootPart = ResolveCharacterModel(Character)
+	local _, _, RootPart = ResolveEspCharacter(Character)
 	return RootPart
+end
+
+local function IsTeammate(Player)
+	if not Flags.TeamCheck then
+		return false
+	end
+
+	local Success, Result = pcall(function()
+		return Player.Team ~= nil and Player.Team == LocalPlayer.Team
+	end)
+	return Success and Result
+end
+
+local function ProjectToScreen(Position)
+	if not Position then
+		return nil, false
+	end
+
+	local Success, ScreenPosition, OnScreen = pcall(WorldToScreen, Position)
+	if not Success then
+		return nil, false
+	end
+	return ScreenPosition, OnScreen
 end
 
 local LegPartNames = { "Left Leg", "Right Leg", "LeftUpperLeg", "RightUpperLeg", "LeftLowerLeg", "RightLowerLeg" }
 local FootPartNames = { "LeftFoot", "RightFoot" }
 
 local function ResolveTargetPart(Character, Head, RootPart, UpperTorso, MousePosition)
-	MousePosition = MousePosition or GetMousePosition()
+	if not MousePosition then
+		local Mouse = LocalPlayer:GetMouse()
+		MousePosition = Vector2.new(Mouse.X, Mouse.Y)
+	end
 	local ClosestPart
 	local ClosestDistanceSquared = math.huge
 	local SeenParts = {}
@@ -488,11 +435,7 @@ local function BuildTarget(Player, MousePosition)
 		return nil
 	end
 
-	local Humanoid, Head, RootPart, UpperTorso = ResolveCharacterModel(Character)
-	if not RootPart or not (Head or UpperTorso) then
-		return nil
-	end
-
+	local Humanoid, Head, RootPart, UpperTorso = ResolveEspCharacter(Character)
 	local Health = 100
 	pcall(function()
 		Health = Humanoid and Humanoid.Health or Character:GetAttribute("Health") or 100
@@ -500,7 +443,8 @@ local function BuildTarget(Player, MousePosition)
 			Health = 0
 		end
 	end)
-	if type(Health) == "number" and Health <= 0 then
+	Health = tonumber(Health) or 100
+	if Health <= 0 or not RootPart or not (Head or UpperTorso) then
 		return nil
 	end
 
@@ -509,16 +453,15 @@ local function BuildTarget(Player, MousePosition)
 		return nil
 	end
 
-	local Target = Cache.AimTargets[Player] or {}
-	Target.Player = Player
-	Target.Character = Character
-	Target.Humanoid = Humanoid
-	Target.Head = Head
-	Target.RootPart = RootPart
-	Target.UpperTorso = UpperTorso
-	Target.TargetPart = TargetPart
-	Cache.AimTargets[Player] = Target
-	return Target
+	return {
+		Player = Player,
+		Character = Character,
+		Humanoid = Humanoid,
+		Head = Head,
+		RootPart = RootPart,
+		UpperTorso = UpperTorso,
+		TargetPart = TargetPart,
+	}
 end
 
 local function GetLockedTarget(MousePosition)
@@ -529,7 +472,7 @@ local function GetLockedTarget(MousePosition)
 	if not Flags.LockedPlayerName then
 		return nil
 	end
-	for _, Player in GetCachedPlayers() do
+	for _, Player in Players:GetPlayers() do
 		if Player.Name == Flags.LockedPlayerName then
 			LockedPlayer = Player
 			return BuildTarget(Player, MousePosition)
@@ -540,22 +483,26 @@ local function GetLockedTarget(MousePosition)
 end
 
 local function FindClosestTarget(Selection, MousePosition)
-	local UseFov = Selection and Selection.FovCheck
+	Selection = Selection or {}
+	local UseFov = Selection.FovCheck
 	if UseFov == nil then
 		UseFov = Flags.FovCheck
 	end
-	local FovRadius = (Selection and Selection.FovRadius) or Flags.FovRadius
-	local MaxDistance = (Selection and Selection.MaxDistance) or Flags.MaxAcquireDistance
-	MousePosition = MousePosition or GetMousePosition()
+	local FovRadius = Selection.FovRadius or Flags.FovRadius
+	local MaxDistance = Selection.MaxDistance or Flags.MaxAcquireDistance
+	if not MousePosition then
+		local Mouse = LocalPlayer:GetMouse()
+		MousePosition = Vector2.new(Mouse.X, Mouse.Y)
+	end
 	local LocalRoot = GetLocalRoot()
 	local LocalPosition = GetPartPosition(LocalRoot)
 	local ClosestTarget
 	local ClosestScreenDistanceSquared = math.huge
 	local ClosestWorldDistanceSquared
-
 	local FovRadiusSquared = FovRadius * FovRadius
 	local MaxDistanceSquared = MaxDistance * MaxDistance
-	for _, Player in GetCachedPlayers() do
+
+	for _, Player in Players:GetPlayers() do
 		local Target = BuildTarget(Player, MousePosition)
 		if not Target then
 			continue
@@ -568,10 +515,8 @@ local function FindClosestTarget(Selection, MousePosition)
 
 		local WorldDistanceSquared
 		if LocalPosition then
-			local X = LocalPosition.X - TargetPosition.X
-			local Y = LocalPosition.Y - TargetPosition.Y
-			local Z = LocalPosition.Z - TargetPosition.Z
-			WorldDistanceSquared = X * X + Y * Y + Z * Z
+			local Offset = LocalPosition - TargetPosition
+			WorldDistanceSquared = Offset.X * Offset.X + Offset.Y * Offset.Y + Offset.Z * Offset.Z
 			if WorldDistanceSquared > MaxDistanceSquared then
 				continue
 			end
@@ -788,15 +733,6 @@ if not WindowSuccess or not WindowResult then
 end
 
 Win = WindowResult
-IsGlobalAnarchy = game.PlaceId == 132640332499066
-Cache = {
-	Mouse = nil,
-	Players = {},
-	PlayersUpdatedAt = -math.huge,
-	Characters = setmetatable({}, { __mode = "k" }),
-	Models = setmetatable({}, { __mode = "k" }),
-	AimTargets = setmetatable({}, { __mode = "k" }),
-}
 pcall(function()
 	Win:SetTitle("virtuosity")
 end)
@@ -839,7 +775,7 @@ local AimbotSection = AimTab:Section("aimbot", "Left")
 local PredictionSection = AimTab:Section("prediction", "Right")
 local SilentSection = AimTab:Section("silent aim", "Right")
 
-AimbotSection:Label("profile: Global Anarchy")
+AimbotSection:Label("profile: Global Anarchy | 132640332499066")
 
 local AimbotToggle = AimbotSection:Toggle("enabled", false, function(Value)
 	Flags.Aimbot = Value
@@ -863,7 +799,7 @@ AimbotSection:Toggle("Roblox team check", false, function(Value)
 	if Value then
 		ClearLock()
 	end
-end):Tooltip("Uses Roblox teams when the game exposes them.")
+end):Tooltip("Uses Roblox teams when Global Anarchy exposes them.")
 
 AimbotSection:Toggle("sticky aim", true, function(Value)
 	Flags.StickyAim = Value
@@ -1087,7 +1023,7 @@ PredictionSection:Dropdown(
 		PredictionScaleSlider:Set(Profile.Scale)
 		MaxLeadSlider:Set(Profile.MaxLead)
 	end
-):Tooltip("Baseline presets; tune these for each Global Anarchy weapon.")
+):Tooltip("Baseline presets; tune them for each Global Anarchy weapon.")
 
 local SilentAimToggle = SilentSection:Toggle("silent aim", false, function(Value)
 	Flags.SilentAim = Value
@@ -1126,12 +1062,12 @@ local EspRangeSection = EspTab:Section("filtering", "Right")
 EspPlayerSection:Toggle("enabled", false, function(Value)
 	Flags.EspEnabled = Value
 	EspStatus.LastError = nil
-	EspStatus.Text = Value and "starting..." or "off"
+	EspStatus.Text = Value and "starting..." or "stopping..."
 end)
 
 EspPlayerSection:Toggle("Roblox team check", false, function(Value)
 	Flags.EspTeamCheck = Value
-end):Tooltip("Uses Roblox teams when the game exposes them.")
+end):Tooltip("Uses Roblox teams when Global Anarchy exposes them.")
 
 local BoxToggle = EspPlayerSection:Toggle("bounding box", true, function(Value)
 	Flags.EspBox = Value
@@ -1226,10 +1162,6 @@ local EspWeaponCache = {}
 local EspErrorReported = false
 local EspRendererFailed = false
 local EspSkippedProperties = {}
-local EspFrameId = 0
-local EspUpdateAccumulator = 0
-local EspWasEnabled = false
-local ESP_UPDATE_INTERVAL = 1 / 60
 
 local function GetInstanceIdentity(Instance)
 	local Address
@@ -1260,8 +1192,6 @@ local function GetPlayerIdentity(Player)
 	end
 	return GetInstanceIdentity(Player)
 end
-
-local LocalPlayerIdentity = GetPlayerIdentity(LocalPlayer)
 
 local function ReportEspError(Prefix, ErrorMessage)
 	local FullMessage = Prefix .. ": " .. tostring(ErrorMessage)
@@ -1554,7 +1484,7 @@ local function GetEspTarget(Player)
 		Head = Cached.Head
 		RootPart = Cached.RootPart
 	else
-		Humanoid, Head, RootPart = ResolveCharacterModel(Character)
+		Humanoid, Head, RootPart = ResolveEspCharacter(Character)
 		local DisplayName = Player.Name
 		pcall(function()
 			if Player.DisplayName and Player.DisplayName ~= "" then
@@ -1595,11 +1525,10 @@ local function GetEspTarget(Player)
 		pcall(function()
 			Health = Character:GetAttribute("Health") or Health
 			MaxHealth = Character:GetAttribute("MaxHealth") or math.max(Health, MaxHealth)
-			if Character:GetAttribute("Alive") == false or Character:GetAttribute("Dead") == true then
-				Health = 0
-			end
 		end)
-		if type(Health) == "number" and Health <= 0 then
+		Health = tonumber(Health) or 100
+		MaxHealth = tonumber(MaxHealth) or math.max(Health, 100)
+		if Health <= 0 then
 			return nil
 		end
 	end
@@ -1827,9 +1756,9 @@ local function UpdateEspFrame()
 	local PlayerCount = 0
 	local ValidCount = 0
 	local DrawnCount = 0
-	EspFrameId = EspFrameId + 1
-	local CurrentFrameId = EspFrameId
-	for _, Player in GetCachedPlayers() do
+	local ActiveBundles = {}
+	local LocalPlayerIdentity = GetPlayerIdentity(LocalPlayer)
+	for _, Player in Players:GetPlayers() do
 		if GetPlayerIdentity(Player) ~= LocalPlayerIdentity then
 			PlayerCount = PlayerCount + 1
 		end
@@ -1850,14 +1779,14 @@ local function UpdateEspFrame()
 			ReportEspError("player update failed", WasDrawn)
 		elseif Success and WasDrawn then
 			DrawnCount = DrawnCount + 1
-			Bundle.ActiveFrame = CurrentFrameId
+			ActiveBundles[Bundle] = true
 		end
 	end
 
 	local Now = tick()
 	for _, Bundle in EspBundles do
 		if
-			Bundle.ActiveFrame ~= CurrentFrameId
+			not ActiveBundles[Bundle]
 			and (not Bundle.LastDrawnAt or Now - Bundle.LastDrawnAt > 0.08)
 		then
 			HideEspBundle(Bundle)
@@ -1877,25 +1806,20 @@ local function UpdateEspFrame()
 	end
 end
 
-TrackConnection(RunService.RenderStepped:Connect(function(DeltaTime)
+TrackConnection(RunService.RenderStepped:Connect(function()
 	if not Flags.Running then
 		return
 	end
 
-	if not Flags.EspEnabled then
-		EspUpdateAccumulator = 0
-		if not EspWasEnabled then
+	local Now = tick()
+	if Flags.EspEnabled then
+		if Now - (EspStatus.LastUpdate or 0) < 1 / 60 then
 			return
 		end
-		EspWasEnabled = false
-	else
-		EspWasEnabled = true
-		EspUpdateAccumulator = EspUpdateAccumulator + Clamp(DeltaTime or ESP_UPDATE_INTERVAL, 0, 0.1)
-		if EspUpdateAccumulator < ESP_UPDATE_INTERVAL then
-			return
-		end
-		EspUpdateAccumulator = EspUpdateAccumulator % ESP_UPDATE_INTERVAL
+	elseif EspStatus.Text == "off" then
+		return
 	end
+	EspStatus.LastUpdate = Now
 
 	local Success, ErrorMessage = pcall(UpdateEspFrame)
 	if not Success then
@@ -1922,7 +1846,8 @@ TrackConnection(RunService.RenderStepped:Connect(function()
 		return
 	end
 
-	local MousePosition = GetMousePosition()
+	local Mouse = LocalPlayer:GetMouse()
+	local MousePosition = Vector2.new(Mouse.X, Mouse.Y)
 	local ShowAimFov = Flags.DrawFov
 	local ShowSilentFov = Flags.DrawFov and Flags.SilentAim and Flags.SilentFovCheck
 	local ShowFov = ShowAimFov or ShowSilentFov
@@ -1976,7 +1901,8 @@ TrackConnection(RunService.Heartbeat:Connect(function(DeltaTime)
 		return
 	end
 
-	local MousePosition = GetMousePosition()
+	local Mouse = LocalPlayer:GetMouse()
+	local MousePosition = Vector2.new(Mouse.X, Mouse.Y)
 	local Target
 	local HasStickyLock = Flags.StickyAim and (LockedPlayer ~= nil or Flags.LockedPlayerName ~= nil)
 	if HasStickyLock then
@@ -2010,12 +1936,9 @@ TrackConnection(RunService.Heartbeat:Connect(function(DeltaTime)
 	local LookPosition = AimPosition
 	if Smoothness > 0 then
 		if SmoothedAimPosition and SmoothedAimTargetName == TargetName then
-			if CachedAimSmoothness ~= Smoothness then
-				CachedAimSmoothness = Smoothness
-				CachedAimResponseSpeed = 28 - ((Smoothness / 100) * 26)
-			end
+			local ResponseSpeed = 28 - ((Smoothness / 100) * 26)
 			local FrameTime = Clamp(DeltaTime or (1 / 60), 0, 1 / 15)
-			local Alpha = math.clamp(1 - math.exp(-CachedAimResponseSpeed * FrameTime), 0.01, 1)
+			local Alpha = math.clamp(1 - math.exp(-ResponseSpeed * FrameTime), 0.01, 1)
 			SmoothedAimPosition = SmoothedAimPosition:Lerp(AimPosition, Alpha)
 		else
 			local CurrentLookPosition
@@ -2042,6 +1965,5 @@ end))
 
 Environment.SilentAim = SilentAim
 Environment.UnloadDesertStormAim = Runtime.Unload
-Environment.UnloadGlobalAnarchyAim = Runtime.Unload
 Environment.__MatchaAimRuntime = Runtime
 InitializationComplete = true
