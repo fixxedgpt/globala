@@ -226,28 +226,209 @@ local function SafeFindFirstChild(Parent, Name)
 	return Success and Child or nil
 end
 
+Runtime.PlayerModels = {}
+
+Runtime.MapModelCandidate = function(Candidate)
+	if not Candidate or Candidate == Workspace then
+		return
+	end
+
+	local IsModel = false
+	pcall(function()
+		IsModel = Candidate:IsA("Model")
+	end)
+	if not IsModel then
+		pcall(function()
+			Candidate = Candidate.Parent
+		end)
+	end
+	if not Candidate or Candidate == Workspace then
+		return
+	end
+
+	Runtime.ModelCandidateSet = Runtime.ModelCandidateSet or {}
+	if Runtime.ModelCandidateSet[Candidate] then
+		return
+	end
+	Runtime.ModelCandidateSet[Candidate] = true
+	Runtime.ModelCandidates[#Runtime.ModelCandidates + 1] = Candidate
+	Runtime.ControllerRigCount = #Runtime.ModelCandidates
+
+	local Owner
+	pcall(function()
+		Owner = Players:GetPlayerFromCharacter(Candidate)
+	end)
+	if Owner then
+		Runtime.PlayerModels[Owner] = Candidate
+		Runtime.ModelClaims[Candidate] = true
+		return
+	end
+
+	local CameraSubject
+	pcall(function()
+		CameraSubject = Workspace.CurrentCamera and Workspace.CurrentCamera.CameraSubject
+	end)
+	if CameraSubject then
+		local IsLocalCharacter = CameraSubject == Candidate
+		pcall(function()
+			IsLocalCharacter = IsLocalCharacter or CameraSubject:IsDescendantOf(Candidate)
+		end)
+		if IsLocalCharacter then
+			Runtime.PlayerModels[LocalPlayer] = Candidate
+			Runtime.ModelClaims[Candidate] = true
+			return
+		end
+	end
+
+	local CandidateName = ""
+	local OwnerName
+	local OwnerId
+	pcall(function()
+		CandidateName = string.lower(Candidate.Name)
+		OwnerName = Candidate:GetAttribute("PlayerName")
+			or Candidate:GetAttribute("OwnerName")
+			or Candidate:GetAttribute("Username")
+		OwnerId = Candidate:GetAttribute("UserId")
+			or Candidate:GetAttribute("PlayerUserId")
+			or Candidate:GetAttribute("OwnerUserId")
+	end)
+	for _, CandidatePlayer in Players:GetPlayers() do
+		local PlayerName
+		local UserId
+		pcall(function()
+			PlayerName = CandidatePlayer.Name
+			UserId = CandidatePlayer.UserId
+		end)
+		if
+			PlayerName
+			and (
+				OwnerName == PlayerName
+				or string.find(CandidateName, string.lower(PlayerName), 1, true)
+				or (UserId and tostring(OwnerId) == tostring(UserId))
+				or (UserId and string.find(CandidateName, tostring(UserId), 1, true))
+			)
+		then
+			Runtime.PlayerModels[CandidatePlayer] = Candidate
+			Runtime.ModelClaims[Candidate] = true
+			return
+		end
+	end
+end
+
+Runtime.ProcessModelScan = function()
+	if not Flags.Running or not Runtime.ModelScanActive then
+		Runtime.ModelScanActive = false
+		return
+	end
+
+	local Queue = Runtime.ModelScanQueue
+	local Index = Runtime.ModelScanIndex
+	local LastIndex = math.min(Index + 47, #Queue)
+	while Index <= LastIndex do
+		local Instance = Queue[Index]
+		Index = Index + 1
+
+		local ClassName
+		local InstanceName
+		local Parent
+		pcall(function()
+			ClassName = Instance.ClassName
+			InstanceName = Instance.Name
+			Parent = Instance.Parent
+		end)
+		if ClassName == "ControllerManager" then
+			Runtime.MapModelCandidate(Parent)
+		elseif InstanceName then
+			local LowerName = string.lower(InstanceName)
+			if LowerName == "characterblock" or LowerName == "characterroot" then
+				Runtime.MapModelCandidate(Parent)
+			end
+		end
+
+		local Children
+		pcall(function()
+			Children = Instance:GetChildren()
+		end)
+		for _, Child in Children or {} do
+			Queue[#Queue + 1] = Child
+		end
+	end
+	Runtime.ModelScanIndex = Index
+
+	if Index <= #Queue then
+		task.delay(0.01, Runtime.ProcessModelScan)
+		return
+	end
+
+	for _, KnownPlayer in Players:GetPlayers() do
+		local KnownCharacter
+		pcall(function()
+			KnownCharacter = KnownPlayer.Character
+		end)
+		if KnownCharacter then
+			Runtime.PlayerModels[KnownPlayer] = KnownCharacter
+			Runtime.ModelClaims[KnownCharacter] = true
+		end
+	end
+
+	local CandidateIndex = 1
+	for _, CandidatePlayer in Players:GetPlayers() do
+		if not Runtime.PlayerModels[CandidatePlayer] then
+			while
+				Runtime.ModelCandidates[CandidateIndex]
+				and Runtime.ModelClaims[Runtime.ModelCandidates[CandidateIndex]]
+			do
+				CandidateIndex = CandidateIndex + 1
+			end
+			local Candidate = Runtime.ModelCandidates[CandidateIndex]
+			if Candidate then
+				Runtime.PlayerModels[CandidatePlayer] = Candidate
+				Runtime.ModelClaims[Candidate] = true
+				CandidateIndex = CandidateIndex + 1
+			end
+		end
+	end
+
+	Runtime.ModelScanQueue = nil
+	Runtime.ModelScanActive = false
+	Runtime.ModelScanFinishedAt = tick()
+	Runtime.AimStatus = "models ready | " .. tostring(Runtime.ControllerRigCount or 0) .. " rigs"
+end
+
+Runtime.RequestModelScan = function()
+	if Runtime.ModelScanActive or tick() - (Runtime.ModelScanFinishedAt or -math.huge) < 2 then
+		return
+	end
+	Runtime.ModelCandidates = {}
+	Runtime.ModelCandidateSet = {}
+	Runtime.ModelClaims = {}
+	Runtime.ControllerRigCount = 0
+	Runtime.ModelScanQueue = { Workspace }
+	Runtime.ModelScanIndex = 1
+	Runtime.ModelScanActive = true
+	Runtime.AimStatus = "scanning models..."
+	task.delay(0, Runtime.ProcessModelScan)
+end
+
 local function GetPlayerCharacter(Player)
 	local Character
 	pcall(function()
 		Character = Player.Character
 	end)
 	if Character then
-		Runtime.PlayerModels = Runtime.PlayerModels or {}
 		Runtime.PlayerModels[Player] = Character
 		return Character
 	end
 
-	Runtime.PlayerModels = Runtime.PlayerModels or {}
 	local CachedCharacter = Runtime.PlayerModels[Player]
 	if CachedCharacter then
-		local IsUsable = true
-		pcall(function()
-			IsUsable = CachedCharacter.Parent ~= nil
-		end)
-		if IsUsable then
-			return CachedCharacter
-		end
-		Runtime.PlayerModels[Player] = nil
+		return CachedCharacter
+	end
+
+	Runtime.PlayerModelMissAt = Runtime.PlayerModelMissAt or {}
+	local Now = tick()
+	if Now - (Runtime.PlayerModelMissAt[Player] or -math.huge) < 0.25 then
+		return nil
 	end
 
 	local PlayerName
@@ -261,220 +442,41 @@ local function GetPlayerCharacter(Player)
 	end
 
 	Character = SafeFindFirstChild(Workspace, PlayerName)
-	if Character then
-		Runtime.PlayerModels[Player] = Character
-		return Character
-	end
-
 	UserId = UserId and tostring(UserId) or nil
 	for _, ContainerName in { "Characters", "PlayerCharacters", "PlayerModels", "Actors", "Entities", "Alive" } do
+		if Character then
+			break
+		end
 		local Container = SafeFindFirstChild(Workspace, ContainerName)
 		if Container then
 			Character = SafeFindFirstChild(Container, PlayerName)
 			if not Character and UserId then
 				Character = SafeFindFirstChild(Container, UserId)
 			end
-			if Character then
-				Runtime.PlayerModels[Player] = Character
-				return Character
-			end
-			local Children
-			pcall(function()
-				Children = Container:GetChildren()
-			end)
-			for _, Model in Children or {} do
-				local OwnerName
-				local OwnerId
-				pcall(function()
-					OwnerName = Model:GetAttribute("PlayerName")
-						or Model:GetAttribute("OwnerName")
-						or Model:GetAttribute("Username")
-					OwnerId = Model:GetAttribute("UserId")
-						or Model:GetAttribute("PlayerUserId")
-						or Model:GetAttribute("OwnerUserId")
-				end)
-				if OwnerName == PlayerName or (UserId and tostring(OwnerId) == UserId) then
-					Runtime.PlayerModels[Player] = Model
-					return Model
-				end
-			end
 		end
 	end
 
-	local Now = tick()
-	if Now - (Runtime.ModelScanAt or -math.huge) < 0.75 then
-		return Runtime.PlayerModels[Player]
-	end
-	Runtime.ModelScanAt = Now
-
-	local PlayerList
-	pcall(function()
-		PlayerList = Players:GetPlayers()
-	end)
-	PlayerList = PlayerList or {}
-	local ClaimedModels = {}
-	for _, KnownPlayer in PlayerList do
-		local KnownCharacter
-		pcall(function()
-			KnownCharacter = KnownPlayer.Character
-		end)
-		if KnownCharacter then
-			Runtime.PlayerModels[KnownPlayer] = KnownCharacter
-			ClaimedModels[KnownCharacter] = true
-		end
+	if Character then
+		Runtime.PlayerModels[Player] = Character
+		Runtime.PlayerModelMissAt[Player] = nil
+		return Character
 	end
 
-	local Candidates = {}
-	local CandidateSet = {}
-	local Descendants
-	pcall(function()
-		Descendants = Workspace:GetDescendants()
-	end)
-	for _, Instance in Descendants or {} do
-		local ClassName
-		local InstanceName
-		pcall(function()
-			ClassName = Instance.ClassName
-			InstanceName = Instance.Name
-		end)
-
-		local IsControllerManager = ClassName == "ControllerManager"
-		if not IsControllerManager then
-			pcall(function()
-				IsControllerManager = Instance:IsA("ControllerManager")
-			end)
-		end
-
-		local Candidate
-		if IsControllerManager then
-			pcall(function()
-				Candidate = Instance.Parent
-			end)
-		elseif InstanceName then
-			local LowerName = string.lower(InstanceName)
-			if LowerName == "characterblock" or LowerName == "characterroot" then
-				pcall(function()
-					Candidate = Instance.Parent
-				end)
-			end
-		end
-
-		if Candidate then
-			local IsModel = false
-			pcall(function()
-				IsModel = Candidate:IsA("Model")
-			end)
-			if not IsModel then
-				local Parent
-				pcall(function()
-					Parent = Candidate.Parent
-				end)
-				Candidate = Parent or Candidate
-			end
-			if not CandidateSet[Candidate] then
-				CandidateSet[Candidate] = true
-				Candidates[#Candidates + 1] = Candidate
-			end
-		end
-	end
-
-	Runtime.ControllerRigCount = #Candidates
-	local CameraSubject
-	pcall(function()
-		CameraSubject = Workspace.CurrentCamera and Workspace.CurrentCamera.CameraSubject
-	end)
-	if CameraSubject then
-		for _, Candidate in Candidates do
-			local IsLocalCharacter = CameraSubject == Candidate
-			if not IsLocalCharacter then
-				pcall(function()
-					IsLocalCharacter = CameraSubject:IsDescendantOf(Candidate)
-				end)
-			end
-			if IsLocalCharacter then
-				Runtime.PlayerModels[LocalPlayer] = Candidate
-				ClaimedModels[Candidate] = true
-				break
-			end
-		end
-	end
-
-	for _, Candidate in Candidates do
-		local Owner
-		pcall(function()
-			Owner = Players:GetPlayerFromCharacter(Candidate)
-		end)
-		if Owner then
-			Runtime.PlayerModels[Owner] = Candidate
-			ClaimedModels[Candidate] = true
-		end
-	end
-
-	for _, Candidate in Candidates do
-		if ClaimedModels[Candidate] then
-			continue
-		end
-
-		local CandidateName = ""
-		local OwnerName
-		local OwnerId
-		pcall(function()
-			CandidateName = string.lower(Candidate.Name)
-			OwnerName = Candidate:GetAttribute("PlayerName")
-				or Candidate:GetAttribute("OwnerName")
-				or Candidate:GetAttribute("Username")
-			OwnerId = Candidate:GetAttribute("UserId")
-				or Candidate:GetAttribute("PlayerUserId")
-				or Candidate:GetAttribute("OwnerUserId")
-		end)
-
-		for _, CandidatePlayer in PlayerList do
-			if Runtime.PlayerModels[CandidatePlayer] then
-				continue
-			end
-			local CandidatePlayerName
-			local CandidateUserId
-			pcall(function()
-				CandidatePlayerName = CandidatePlayer.Name
-				CandidateUserId = CandidatePlayer.UserId
-			end)
-			if
-				CandidatePlayerName
-				and (
-					OwnerName == CandidatePlayerName
-					or string.find(CandidateName, string.lower(CandidatePlayerName), 1, true)
-					or (CandidateUserId and tostring(OwnerId) == tostring(CandidateUserId))
-					or (CandidateUserId and string.find(CandidateName, tostring(CandidateUserId), 1, true))
-				)
-			then
-				Runtime.PlayerModels[CandidatePlayer] = Candidate
-				ClaimedModels[Candidate] = true
-				break
-			end
-		end
-	end
-
-	local CandidateIndex = 1
-	for _, CandidatePlayer in PlayerList do
-		if Runtime.PlayerModels[CandidatePlayer] then
-			continue
-		end
-		while Candidates[CandidateIndex] and ClaimedModels[Candidates[CandidateIndex]] do
-			CandidateIndex = CandidateIndex + 1
-		end
-		if Candidates[CandidateIndex] then
-			Runtime.PlayerModels[CandidatePlayer] = Candidates[CandidateIndex]
-			ClaimedModels[Candidates[CandidateIndex]] = true
-			CandidateIndex = CandidateIndex + 1
-		end
-	end
-
+	Runtime.PlayerModelMissAt[Player] = Now
+	Runtime.RequestModelScan()
 	return Runtime.PlayerModels[Player]
 end
 
 local function ResolveEspCharacter(Character)
 	if not Character then
 		return nil, nil, nil, nil
+	end
+
+	Runtime.CharacterParts = Runtime.CharacterParts or {}
+	local Now = tick()
+	local Cached = Runtime.CharacterParts[Character]
+	if Cached and Now < Cached.ExpiresAt and GetPartPosition(Cached.RootPart) then
+		return Cached.Humanoid, Cached.Head, Cached.RootPart, Cached.UpperTorso
 	end
 
 	local Humanoid = SafeFindFirstChild(Character, "Humanoid")
@@ -577,7 +579,15 @@ local function ResolveEspCharacter(Character)
 	end
 	RootPart = RootPart or UpperTorso or FirstPart
 	Head = Head or HighestPart or RootPart
-	return Humanoid, Head, RootPart, UpperTorso or RootPart
+	UpperTorso = UpperTorso or RootPart
+	Runtime.CharacterParts[Character] = {
+		Humanoid = Humanoid,
+		Head = Head,
+		RootPart = RootPart,
+		UpperTorso = UpperTorso,
+		ExpiresAt = Now + 0.75,
+	}
+	return Humanoid, Head, RootPart, UpperTorso
 end
 
 local function GetLocalRoot()
@@ -2067,12 +2077,16 @@ local function UpdateEspFrame()
 	end
 
 	if not EspStatus.LastError then
-		EspStatus.Text = tostring(DrawnCount)
-			.. "/"
-			.. tostring(ValidCount)
-			.. " drawn | "
-			.. tostring(PlayerCount)
-			.. " players"
+		if Runtime.ModelScanActive and ValidCount == 0 then
+			EspStatus.Text = "scanning models..."
+		else
+			EspStatus.Text = tostring(DrawnCount)
+				.. "/"
+				.. tostring(ValidCount)
+				.. " drawn | "
+				.. tostring(PlayerCount)
+				.. " players"
+		end
 		if Runtime.ControllerResolverSeen then
 			EspStatus.Text = EspStatus.Text .. " | controller"
 		elseif Runtime.ControllerRigCount then
@@ -2202,8 +2216,12 @@ TrackConnection(RunService.Heartbeat:Connect(function(DeltaTime)
 
 	if not Target then
 		ClearAimSmoothing()
-		Runtime.AimStatus = "no target"
-		if Runtime.ControllerRigCount then
+		if Runtime.ModelScanActive then
+			Runtime.AimStatus = "scanning models..."
+		else
+			Runtime.AimStatus = "no target"
+		end
+		if Runtime.ControllerRigCount and not Runtime.ModelScanActive then
 			Runtime.AimStatus = Runtime.AimStatus .. " | " .. tostring(Runtime.ControllerRigCount) .. " rigs"
 		end
 		return
