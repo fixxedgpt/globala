@@ -323,7 +323,7 @@ Runtime.ProcessModelScan = function()
 
 	local Queue = Runtime.ModelScanQueue
 	local Index = Runtime.ModelScanIndex
-	local LastIndex = math.min(Index + 47, #Queue)
+	local LastIndex = math.min(Index + 95, #Queue)
 	while Index <= LastIndex do
 		local Instance = Queue[Index]
 		Index = Index + 1
@@ -355,7 +355,7 @@ Runtime.ProcessModelScan = function()
 	end
 	Runtime.ModelScanIndex = Index
 
-	if Index <= #Queue then
+	if Index <= #Queue and tick() - Runtime.ModelScanStartedAt < 6 then
 		task.delay(0.01, Runtime.ProcessModelScan)
 		return
 	end
@@ -405,6 +405,7 @@ Runtime.RequestModelScan = function()
 	Runtime.ControllerRigCount = 0
 	Runtime.ModelScanQueue = { Workspace }
 	Runtime.ModelScanIndex = 1
+	Runtime.ModelScanStartedAt = tick()
 	Runtime.ModelScanActive = true
 	Runtime.AimStatus = "scanning models..."
 	task.delay(0, Runtime.ProcessModelScan)
@@ -613,10 +614,37 @@ local function ProjectToScreen(Position)
 	end
 
 	local Success, ScreenPosition, OnScreen = pcall(WorldToScreen, Position)
-	if not Success then
+	if not Success or not ScreenPosition then
 		return nil, false
 	end
-	return ScreenPosition, OnScreen
+	if OnScreen == true then
+		return ScreenPosition, true
+	end
+
+	-- Matcha can return usable coordinates with a missing/stale visibility boolean
+	-- for custom cameras. Rebuild visibility from the current viewport and facing.
+	local CoordinatesInViewport = false
+	local InFront = true
+	pcall(function()
+		local Camera = Workspace.CurrentCamera
+		local ViewportSize = Camera and Camera.ViewportSize
+		local X = ScreenPosition.X
+		local Y = ScreenPosition.Y
+		CoordinatesInViewport = X == X
+			and Y == Y
+			and ViewportSize
+			and X >= -8
+			and Y >= -8
+			and X <= ViewportSize.X + 8
+			and Y <= ViewportSize.Y + 8
+	end)
+	pcall(function()
+		local Camera = Workspace.CurrentCamera
+		local Offset = Position - Camera.Position
+		local LookVector = Camera.CFrame.LookVector
+		InFront = Offset.X * LookVector.X + Offset.Y * LookVector.Y + Offset.Z * LookVector.Z > 0
+	end)
+	return ScreenPosition, CoordinatesInViewport and InFront
 end
 
 local LegPartNames = { "Left Leg", "Right Leg", "LeftUpperLeg", "RightUpperLeg", "LeftLowerLeg", "RightLowerLeg" }
@@ -1859,21 +1887,21 @@ end
 local function UpdateEspBundle(Bundle, Target, Camera, Origin)
 	local TargetPosition = GetPartPosition(Target.RootPart)
 	if not TargetPosition then
-		return false
+		return false, "position"
 	end
 
 	if not Origin then
-		return false
+		return false, "origin"
 	end
 
 	local Distance = (Origin - TargetPosition).Magnitude
 	if Distance > Flags.EspMaxDistance then
-		return false
+		return false, "range"
 	end
 
 	local X, Y, Width, Height = GetEspBox(Target)
 	if not X then
-		return false
+		return false, "projection"
 	end
 
 	if Flags.EspChams and Bundle.Chams then
@@ -2039,6 +2067,7 @@ local function UpdateEspFrame()
 	local PlayerCount = 0
 	local ValidCount = 0
 	local DrawnCount = 0
+	local SkipCounts = {}
 	local ActiveBundles = {}
 	local LocalPlayerIdentity = GetPlayerIdentity(LocalPlayer)
 	for _, Player in Players:GetPlayers() do
@@ -2047,7 +2076,7 @@ local function UpdateEspFrame()
 		end
 
 		local Bundle
-		local Success, WasDrawn = pcall(function()
+		local Success, WasDrawn, SkipReason = pcall(function()
 			local Target = GetEspTarget(Player)
 			if Target then
 				ValidCount = ValidCount + 1
@@ -2055,14 +2084,17 @@ local function UpdateEspFrame()
 				if Bundle then
 					return UpdateEspBundle(Bundle, Target, Camera, Origin)
 				end
+				return false, "bundle"
 			end
-			return false
+			return false, "model"
 		end)
 		if not Success and not EspErrorReported then
 			ReportEspError("player update failed", WasDrawn)
 		elseif Success and WasDrawn then
 			DrawnCount = DrawnCount + 1
 			ActiveBundles[Bundle] = true
+		elseif Success and SkipReason then
+			SkipCounts[SkipReason] = (SkipCounts[SkipReason] or 0) + 1
 		end
 	end
 
@@ -2077,20 +2109,28 @@ local function UpdateEspFrame()
 	end
 
 	if not EspStatus.LastError then
-		if Runtime.ModelScanActive and ValidCount == 0 then
-			EspStatus.Text = "scanning models..."
-		else
-			EspStatus.Text = tostring(DrawnCount)
+		EspStatus.Text = tostring(DrawnCount)
+			.. "/"
+			.. tostring(ValidCount)
+			.. " drawn | "
+			.. tostring(PlayerCount)
+			.. " players"
+		if Runtime.ModelScanActive then
+			EspStatus.Text = EspStatus.Text
+				.. " | scan "
+				.. tostring(Runtime.ModelScanIndex or 0)
 				.. "/"
-				.. tostring(ValidCount)
-				.. " drawn | "
-				.. tostring(PlayerCount)
-				.. " players"
+				.. tostring(Runtime.ModelScanQueue and #Runtime.ModelScanQueue or 0)
 		end
 		if Runtime.ControllerResolverSeen then
 			EspStatus.Text = EspStatus.Text .. " | controller"
 		elseif Runtime.ControllerRigCount then
 			EspStatus.Text = EspStatus.Text .. " | " .. tostring(Runtime.ControllerRigCount) .. " rigs"
+		end
+		if DrawnCount == 0 and SkipCounts.projection then
+			EspStatus.Text = EspStatus.Text .. " | projection " .. tostring(SkipCounts.projection)
+		elseif DrawnCount == 0 and SkipCounts.range then
+			EspStatus.Text = EspStatus.Text .. " | range " .. tostring(SkipCounts.range)
 		end
 		if next(EspSkippedProperties) then
 			EspStatus.Text = EspStatus.Text .. " | compat"
